@@ -1,0 +1,434 @@
+{% extends 'base.html' %}
+
+{% block title %}Habit Tracker - Build Better Habits{% endblock %}
+
+{% block content %}
+<div id="app" class="container mx-auto px-4 py-8 max-w-6xl">
+    <!-- Header -->
+    <div class="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-8 mb-8 text-white">
+        <h1 class="text-4xl font-bold mb-2">Habit Tracker</h1>
+        <p class="text-indigo-100">Build better habits, one day at a time</p>
+        <div class="mt-4 text-sm" id="offline-status">
+            <span class="inline-flex items-center px-3 py-1 rounded-full bg-green-500 text-white">
+                <i class="fas fa-wifi mr-2"></i> Online
+            </span>
+        </div>
+    </div>
+
+    <!-- Add Habit Button -->
+    <div class="mb-6">
+        <button onclick="showAddHabitModal()" class="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors">
+            <i class="fas fa-plus mr-2"></i> Add New Habit
+        </button>
+    </div>
+
+    <!-- Habits Grid -->
+    <div id="habits-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+        <!-- Habits will be loaded here -->
+    </div>
+
+    <!-- Statistics Section -->
+    <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+        <h2 class="text-2xl font-bold mb-4">Statistics</h2>
+        <canvas id="stats-chart" height="100"></canvas>
+    </div>
+</div>
+
+<!-- Add Habit Modal -->
+<div id="addHabitModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+    <div class="bg-white rounded-xl p-6 w-full max-w-md">
+        <h3 class="text-xl font-bold mb-4">Add New Habit</h3>
+        <form id="addHabitForm">
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">Habit Name</label>
+                <input type="text" id="habitName" required class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-indigo-500">
+            </div>
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">Description</label>
+                <textarea id="habitDescription" rows="3" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-indigo-500"></textarea>
+            </div>
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">Frequency</label>
+                <select id="habitFrequency" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-indigo-500">
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                </select>
+            </div>
+            <div class="mb-4">
+                <label class="flex items-center">
+                    <input type="checkbox" id="reminderEnabled" class="mr-2">
+                    <span class="text-gray-700">Enable Reminders</span>
+                </label>
+            </div>
+            <div class="mb-4" id="reminderTimeDiv" style="display:none;">
+                <label class="block text-gray-700 mb-2">Reminder Time</label>
+                <input type="time" id="reminderTime" class="w-full px-3 py-2 border rounded-lg">
+            </div>
+            <div class="flex justify-end space-x-3">
+                <button type="button" onclick="hideAddHabitModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800">Cancel</button>
+                <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Add Habit</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    let habits = [];
+    let chart = null;
+
+    // IndexedDB Setup
+    const DB_NAME = 'HabitTrackerDB';
+    const DB_VERSION = 1;
+    let db = null;
+
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                db = request.result;
+                resolve(db);
+            };
+            
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                
+                // Habits store
+                if (!db.objectStoreNames.contains('habits')) {
+                    const habitStore = db.createObjectStore('habits', { keyPath: 'id', autoIncrement: true });
+                    habitStore.createIndex('name', 'name', { unique: false });
+                }
+                
+                // Checkins store
+                if (!db.objectStoreNames.contains('checkins')) {
+                    const checkinStore = db.createObjectStore('checkins', { keyPath: 'id', autoIncrement: true });
+                    checkinStore.createIndex('habit_id', 'habit_id', { unique: false });
+                    checkinStore.createIndex('date', 'date', { unique: false });
+                }
+            };
+        });
+    }
+
+    async function saveToIndexedDB(storeName, data) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            const request = store.put(data);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getAllFromIndexedDB(storeName) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([storeName], 'readonly');
+            const store = transaction.objectStore(storeName);
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function deleteFromIndexedDB(storeName, id) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            const request = store.delete(id);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // API Calls with offline support
+    async function fetchHabits() {
+        try {
+            const response = await fetch('/api/habits/');
+            if (response.ok) {
+                const data = await response.json();
+                habits = data;
+                // Save to IndexedDB for offline access
+                for (const habit of habits) {
+                    await saveToIndexedDB('habits', habit);
+                }
+                renderHabits();
+                updateOfflineStatus(true);
+                return data;
+            }
+        } catch (error) {
+            console.log('Offline mode - loading from IndexedDB');
+            updateOfflineStatus(false);
+            const offlineHabits = await getAllFromIndexedDB('habits');
+            habits = offlineHabits;
+            renderHabits();
+            return offlineHabits;
+        }
+    }
+
+    async function createHabit(habitData) {
+        try {
+            const response = await fetch('/api/habits/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(habitData)
+            });
+            if (response.ok) {
+                const data = await response.json();
+                await fetchHabits();
+                return data;
+            }
+        } catch (error) {
+            // Save to IndexedDB for offline sync
+            const offlineHabit = { ...habitData, id: Date.now(), synced: false };
+            await saveToIndexedDB('habits', offlineHabit);
+            habits.push(offlineHabit);
+            renderHabits();
+            alert('Habit saved offline. Will sync when online.');
+        }
+    }
+
+    async function toggleCheckin(habitId, date, completed) {
+        try {
+            const response = await fetch(`/api/habits/${habitId}/checkins/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date, completed })
+            });
+            if (response.ok) {
+                await fetchHabits();
+                updateStats();
+                return true;
+            }
+        } catch (error) {
+            // Save to IndexedDB for offline sync
+            const checkin = { habit_id: habitId, date, completed, synced: false };
+            await saveToIndexedDB('checkins', checkin);
+            updateLocalCheckin(habitId, date, completed);
+            alert('Checkin saved offline. Will sync when online.');
+        }
+    }
+
+    function updateLocalCheckin(habitId, date, completed) {
+        const habit = habits.find(h => h.id === habitId);
+        if (habit) {
+            // Update local display without waiting for server
+            renderHabits();
+        }
+    }
+
+    // Sync offline data when back online
+    window.addEventListener('online', async () => {
+        console.log('Back online - syncing data');
+        updateOfflineStatus(true);
+        
+        // Sync offline habits
+        const offlineHabits = await getAllFromIndexedDB('habits');
+        const unsyncedHabits = offlineHabits.filter(h => !h.synced);
+        
+        for (const habit of unsyncedHabits) {
+            try {
+                const response = await fetch('/api/habits/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(habit)
+                });
+                if (response.ok) {
+                    await deleteFromIndexedDB('habits', habit.id);
+                }
+            } catch (error) {
+                console.error('Failed to sync habit:', habit);
+            }
+        }
+        
+        // Sync offline checkins
+        const offlineCheckins = await getAllFromIndexedDB('checkins');
+        const unsyncedCheckins = offlineCheckins.filter(c => !c.synced);
+        
+        for (const checkin of unsyncedCheckins) {
+            try {
+                const response = await fetch(`/api/habits/${checkin.habit_id}/checkins/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(checkin)
+                });
+                if (response.ok) {
+                    await deleteFromIndexedDB('checkins', checkin.id);
+                }
+            } catch (error) {
+                console.error('Failed to sync checkin:', checkin);
+            }
+        }
+        
+        await fetchHabits();
+        updateStats();
+    });
+
+    function renderHabits() {
+        const grid = document.getElementById('habits-grid');
+        if (!habits.length) {
+            grid.innerHTML = '<div class="col-span-full text-center text-gray-500 py-12">No habits yet. Add your first habit to get started!</div>';
+            return;
+        }
+        
+        grid.innerHTML = habits.map(habit => `
+            <div class="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition-shadow">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h3 class="text-xl font-bold text-gray-800">${escapeHtml(habit.name)}</h3>
+                        <p class="text-gray-600 text-sm mt-1">${escapeHtml(habit.description || 'No description')}</p>
+                    </div>
+                    <button onclick="deleteHabit(${habit.id})" class="text-red-500 hover:text-red-700">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                
+                <div class="flex justify-between items-center mb-4">
+                    <div class="text-sm text-gray-600">
+                        <i class="fas fa-calendar mr-1"></i> ${habit.frequency}
+                    </div>
+                    <div class="text-sm text-gray-600">
+                        <i class="fas fa-fire mr-1"></i> Streak: ${habit.current_streak || 0} days
+                    </div>
+                </div>
+                
+                <div class="flex items-center justify-between mt-4">
+                    <button onclick="checkinToday(${habit.id})" 
+                            class="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition-colors">
+                        <i class="fas fa-check mr-2"></i> Check In
+                    </button>
+                    <div class="text-sm text-gray-500">
+                        Longest streak: ${habit.longest_streak || 0}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    async function checkinToday(habitId) {
+        const today = new Date().toISOString().split('T')[0];
+        await toggleCheckin(habitId, today, true);
+    }
+
+    async function deleteHabit(habitId) {
+        if (confirm('Are you sure you want to delete this habit?')) {
+            try {
+                const response = await fetch(`/api/habits/${habitId}/`, {
+                    method: 'DELETE'
+                });
+                if (response.ok) {
+                    await fetchHabits();
+                    updateStats();
+                }
+            } catch (error) {
+                alert('Error deleting habit. Please try again.');
+            }
+        }
+    }
+
+    async function updateStats() {
+        try {
+            const response = await fetch('/api/stats/');
+            if (response.ok) {
+                const stats = await response.json();
+                if (chart) {
+                    chart.destroy();
+                }
+                const ctx = document.getElementById('stats-chart').getContext('2d');
+                chart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: stats.map(s => s.habit_name),
+                        datasets: [{
+                            label: 'Current Streak',
+                            data: stats.map(s => s.current_streak),
+                            backgroundColor: 'rgba(79, 70, 229, 0.5)',
+                            borderColor: 'rgba(79, 70, 229, 1)',
+                            borderWidth: 1
+                        }, {
+                            label: 'Longest Streak',
+                            data: stats.map(s => s.longest_streak),
+                            backgroundColor: 'rgba(16, 185, 129, 0.5)',
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Days'
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('Error fetching stats:', error);
+        }
+    }
+
+    function updateOfflineStatus(isOnline) {
+        const statusDiv = document.getElementById('offline-status');
+        if (isOnline) {
+            statusDiv.innerHTML = '<span class="inline-flex items-center px-3 py-1 rounded-full bg-green-500 text-white"><i class="fas fa-wifi mr-2"></i> Online</span>';
+        } else {
+            statusDiv.innerHTML = '<span class="inline-flex items-center px-3 py-1 rounded-full bg-yellow-500 text-white"><i class="fas fa-sync-alt mr-2"></i> Offline Mode</span>';
+        }
+    }
+
+    function showAddHabitModal() {
+        document.getElementById('addHabitModal').classList.remove('hidden');
+        document.getElementById('addHabitModal').classList.add('flex');
+    }
+
+    function hideAddHabitModal() {
+        document.getElementById('addHabitModal').classList.add('hidden');
+        document.getElementById('addHabitModal').classList.remove('flex');
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    // Initialize app
+    document.addEventListener('DOMContentLoaded', async () => {
+        await openDB();
+        await fetchHabits();
+        await updateStats();
+        
+        // Reminder checkbox handler
+        document.getElementById('reminderEnabled').addEventListener('change', function(e) {
+            const reminderTimeDiv = document.getElementById('reminderTimeDiv');
+            reminderTimeDiv.style.display = e.target.checked ? 'block' : 'none';
+        });
+        
+        // Add habit form handler
+        document.getElementById('addHabitForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const habitData = {
+                name: document.getElementById('habitName').value,
+                description: document.getElementById('habitDescription').value,
+                frequency: document.getElementById('habitFrequency').value,
+                reminder_enabled: document.getElementById('reminderEnabled').checked,
+                reminder_time: document.getElementById('reminderEnabled').checked ? 
+                    document.getElementById('reminderTime').value : null
+            };
+            await createHabit(habitData);
+            hideAddHabitModal();
+            document.getElementById('addHabitForm').reset();
+            document.getElementById('reminderTimeDiv').style.display = 'none';
+        });
+    });
+</script>
+{% endblock %}
